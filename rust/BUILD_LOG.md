@@ -161,7 +161,8 @@ Breakdown by module:
 ## Performance Notes
 
 - Debug build: ~1.5s
-- Release build: In progress (dependencies take longer)
+- Release build: ~58s (first time, includes all dependencies)
+- Binary size: 7.4MB (release, not stripped)
 - Concurrent fetching works as expected
 - SQLite transactions are atomic
 - Memory usage minimal (<10MB RSS)
