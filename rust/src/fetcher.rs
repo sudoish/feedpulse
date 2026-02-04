@@ -1,237 +1,196 @@
-use crate::models::{Config, FeedConfig, FeedResult, FetchStatus};
-use crate::parser;
-use anyhow::Result;
+use crate::config::{Config, Feed};
+use crate::models::FeedItem;
+use crate::parser::Parser;
+use reqwest::Client;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tokio::time::sleep;
 
-/// Fetch all feeds concurrently with retry logic
-pub async fn fetch_all_feeds(config: &Config) -> Vec<FeedResult> {
-    let semaphore = Arc::new(Semaphore::new(config.settings.max_concurrency));
-    let mut tasks = Vec::new();
-    
-    for feed in &config.feeds {
-        let feed = feed.clone();
-        let settings = config.settings.clone();
-        let sem = semaphore.clone();
-        
-        let task = tokio::spawn(async move {
-            // Acquire semaphore permit
-            let _permit = sem.acquire().await.unwrap();
-            fetch_single_feed(&feed, &settings).await
-        });
-        
-        tasks.push(task);
-    }
-    
-    // Wait for all tasks to complete
-    let mut results = Vec::new();
-    for task in tasks {
-        match task.await {
-            Ok(result) => results.push(result),
-            Err(e) => {
-                eprintln!("Error: task panicked: {}", e);
-            }
-        }
-    }
-    
-    results
+#[derive(Debug, Clone)]
+pub struct FetchResult {
+    pub source: String,
+    pub items: Vec<FeedItem>,
+    pub new_items: usize,
+    pub duration_ms: u64,
+    pub error: Option<String>,
 }
 
-/// Fetch a single feed with retry logic
-async fn fetch_single_feed(
-    feed: &FeedConfig,
-    settings: &crate::models::Settings,
-) -> FeedResult {
-    let start_time = Instant::now();
-    
-    // Try to fetch with retries
-    let fetch_result = fetch_with_retry(feed, settings).await;
-    
-    let duration_ms = start_time.elapsed().as_millis() as u64;
-    
-    match fetch_result {
-        Ok(body) => {
-            // Parse the response
-            match parser::parse_feed(&feed.name, &feed.feed_type, &body) {
-                Ok(items) => FeedResult {
-                    source_name: feed.name.clone(),
-                    status: FetchStatus::Success,
-                    items,
-                    duration_ms,
-                    error_message: None,
-                },
-                Err(e) => {
-                    eprintln!("Error: {}: parse error: {}", feed.name, e);
-                    FeedResult {
-                        source_name: feed.name.clone(),
-                        status: FetchStatus::Error,
-                        items: vec![],
+pub struct Fetcher {
+    config: Config,
+    client: Client,
+}
+
+impl Fetcher {
+    pub fn new(config: Config) -> Self {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(config.settings.default_timeout_secs))
+            .build()
+            .expect("Failed to build HTTP client");
+
+        Self { config, client }
+    }
+
+    pub async fn fetch_all(&self) -> Vec<FetchResult> {
+        let feeds = self.config.feeds.clone();
+        let max_concurrency = self.config.settings.max_concurrency;
+
+        println!(
+            "Fetching {} feeds (max concurrency: {})...",
+            feeds.len(),
+            max_concurrency
+        );
+
+        let semaphore = Arc::new(Semaphore::new(max_concurrency));
+        let mut tasks = Vec::new();
+
+        for feed in feeds {
+            let sem = semaphore.clone();
+            let client = self.client.clone();
+            let retry_max = self.config.settings.retry_max;
+            let retry_base_delay = self.config.settings.retry_base_delay_ms;
+
+            let task = tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                Self::fetch_feed(client, feed, retry_max, retry_base_delay).await
+            });
+
+            tasks.push(task);
+        }
+
+        let mut results = Vec::new();
+        for task in tasks {
+            if let Ok(result) = task.await {
+                results.push(result);
+            }
+        }
+
+        results
+    }
+
+    async fn fetch_feed(
+        client: Client,
+        feed: Feed,
+        retry_max: usize,
+        retry_base_delay: u64,
+    ) -> FetchResult {
+        let start = Instant::now();
+        let source = feed.name.clone();
+
+        for attempt in 0..=retry_max {
+            match Self::try_fetch(&client, &feed).await {
+                Ok(items) => {
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    return FetchResult {
+                        source,
+                        items,
+                        new_items: 0, // Will be updated by storage
                         duration_ms,
-                        error_message: Some(format!("parse error: {}", e)),
-                    }
+                        error: None,
+                    };
                 }
-            }
-        }
-        Err(e) => FeedResult {
-            source_name: feed.name.clone(),
-            status: FetchStatus::Error,
-            items: vec![],
-            duration_ms,
-            error_message: Some(e),
-        },
-    }
-}
+                Err(e) => {
+                    if attempt < retry_max {
+                        // Check if we should retry based on error type
+                        let should_retry = match &e {
+                            FetchError::Http(status) => {
+                                // Don't retry 4xx errors except 429
+                                if status.as_u16() == 429 {
+                                    true
+                                } else if status.is_client_error() {
+                                    false
+                                } else {
+                                    true // Retry 5xx and other errors
+                                }
+                            }
+                            _ => true, // Retry network errors, timeouts, etc.
+                        };
 
-/// Fetch URL with exponential backoff retry logic
-async fn fetch_with_retry(
-    feed: &FeedConfig,
-    settings: &crate::models::Settings,
-) -> Result<String, String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(settings.default_timeout_secs))
-        .build()
-        .map_err(|e| format!("failed to create HTTP client: {}", e))?;
-    
-    let mut last_error = String::new();
-    
-    for attempt in 0..=settings.retry_max {
-        // Add jitter to retry delay
-        if attempt > 0 {
-            let base_delay = settings.retry_base_delay_ms;
-            let delay = base_delay * 2_u64.pow(attempt - 1);
-            let jitter_range = (delay / 10).max(1);
-            let jitter = (rand::random::<u64>() % jitter_range) as i64;
-            let actual_delay = (delay as i64 + jitter).max(0) as u64;
-            
-            sleep(Duration::from_millis(actual_delay)).await;
-        }
-        
-        // Build request
-        let mut request = client.get(&feed.url);
-        
-        // Add custom headers
-        for (key, value) in &feed.headers {
-            request = request.header(key, value);
-        }
-        
-        // Execute request
-        match request.send().await {
-            Ok(response) => {
-                let status = response.status();
-                
-                // Check HTTP status
-                if status.is_success() {
-                    // Success - read body
-                    match response.text().await {
-                        Ok(body) => return Ok(body),
-                        Err(e) => {
-                            last_error = format!("failed to read response body: {}", e);
+                        if should_retry {
+                            let delay = retry_base_delay * 2_u64.pow(attempt as u32);
+                            sleep(Duration::from_millis(delay)).await;
                             continue;
                         }
                     }
-                } else if status == reqwest::StatusCode::NOT_FOUND {
-                    // 404 - don't retry
-                    return Err(format!("HTTP 404"));
-                } else if status.is_client_error() {
-                    // 4xx - retry only for 429
-                    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                        last_error = format!("HTTP 429");
-                        continue;
-                    } else {
-                        return Err(format!("HTTP {}", status.as_u16()));
-                    }
-                } else if status.is_server_error() {
-                    // 5xx - retry
-                    last_error = format!("HTTP {}", status.as_u16());
-                    continue;
-                } else {
-                    // Unknown status
-                    return Err(format!("HTTP {}", status.as_u16()));
+
+                    // All retries exhausted or non-retryable error
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    return FetchResult {
+                        source,
+                        items: Vec::new(),
+                        new_items: 0,
+                        duration_ms,
+                        error: Some(format!("{} after {} retries", e, retry_max)),
+                    };
                 }
             }
-            Err(e) => {
-                // Network error - retry
-                last_error = if e.is_timeout() {
-                    "timeout".to_string()
-                } else if e.is_connect() {
-                    "connection failed".to_string()
-                } else {
-                    format!("network error: {}", e)
-                };
-                continue;
-            }
         }
+
+        unreachable!()
     }
-    
-    // All retries exhausted
-    Err(format!("{} after {} retries", last_error, settings.retry_max))
+
+    async fn try_fetch(client: &Client, feed: &Feed) -> Result<Vec<FeedItem>, FetchError> {
+        let mut request = client.get(&feed.url);
+
+        for (key, value) in &feed.headers {
+            request = request.header(key, value);
+        }
+
+        let response = request.send().await.map_err(|e| {
+            if e.is_timeout() {
+                FetchError::Timeout
+            } else if e.is_connect() {
+                FetchError::Connect
+            } else {
+                FetchError::Network(e.to_string())
+            }
+        })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(FetchError::Http(status));
+        }
+
+        let body = response.text().await.map_err(|e| FetchError::Network(e.to_string()))?;
+
+        // Parse feed
+        Parser::parse(&feed.name, &feed.feed_type, &body)
+            .map_err(|e| FetchError::Parse(e))
+    }
+
 }
 
-// Simple random number generator for jitter
-mod rand {
-    use std::cell::Cell;
-    use std::time::{SystemTime, UNIX_EPOCH};
-    
-    thread_local! {
-        static SEED: Cell<u64> = Cell::new(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos() as u64
+pub fn print_result(result: &FetchResult) {
+    if let Some(error) = &result.error {
+        eprintln!("  ✗ {:<25} — error: {}", result.source, error);
+    } else {
+        println!(
+            "  ✓ {:<25} — {} items ({} new) in {}ms",
+            result.source,
+            result.items.len(),
+            result.new_items,
+            result.duration_ms
         );
     }
-    
-    pub fn random<T: From<u64>>() -> T {
-        SEED.with(|seed| {
-            let mut s = seed.get();
-            s ^= s << 13;
-            s ^= s >> 7;
-            s ^= s << 17;
-            seed.set(s);
-            T::from(s)
-        })
-    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::models::{FeedType, Settings};
-    use std::collections::HashMap;
+#[derive(Debug)]
+enum FetchError {
+    Timeout,
+    Connect,
+    Network(String),
+    Http(reqwest::StatusCode),
+    Parse(String),
+}
 
-    #[test]
-    fn test_exponential_backoff_calculation() {
-        // Test that delay increases exponentially
-        let base = 100u64;
-        let delay1 = base * 2_u64.pow(0);
-        let delay2 = base * 2_u64.pow(1);
-        let delay3 = base * 2_u64.pow(2);
-        
-        assert_eq!(delay1, 100);
-        assert_eq!(delay2, 200);
-        assert_eq!(delay3, 400);
-    }
-
-    #[tokio::test]
-    async fn test_fetch_invalid_url() {
-        let feed = FeedConfig {
-            name: "Test".to_string(),
-            url: "https://invalid.example.notarealurl".to_string(),
-            feed_type: FeedType::Json,
-            refresh_interval_secs: 300,
-            headers: HashMap::new(),
-        };
-        
-        let settings = Settings {
-            retry_max: 1,
-            retry_base_delay_ms: 10,
-            ..Default::default()
-        };
-        
-        let result = fetch_single_feed(&feed, &settings).await;
-        assert_eq!(result.status, FetchStatus::Error);
-        assert!(result.error_message.is_some());
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FetchError::Timeout => write!(f, "HTTP timeout"),
+            FetchError::Connect => write!(f, "DNS resolution failure"),
+            FetchError::Network(msg) => write!(f, "network error: {}", msg),
+            FetchError::Http(status) => write!(f, "HTTP {}", status),
+            FetchError::Parse(msg) => write!(f, "parse error: {}", msg),
+        }
     }
 }

@@ -1,0 +1,6 @@
+settings:
+  max_concurrency: 5
+
+feeds:
+  - name: "Missing URL Feed"
+    feed_type: "json"

@@ -21,3 +21,5 @@ python/venv/
 rust/target/
 go/feedpulse
 *.db
+BLOG_POST.md
+rust-backup-*/

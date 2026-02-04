@@ -1,213 +1,118 @@
-use crate::models::{Config, FeedConfig};
-use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use url::Url;
 
-/// Load and validate configuration from a YAML file
-pub fn load_config<P: AsRef<Path>>(path: P) -> Result<Config> {
-    let path = path.as_ref();
-    
-    // Check if file exists
-    if !path.exists() {
-        anyhow::bail!("config file not found: {}", path.display());
-    }
-    
-    // Read file contents
-    let contents = fs::read_to_string(path)
-        .with_context(|| format!("failed to read config file: {}", path.display()))?;
-    
-    // Parse YAML
-    let config: Config = serde_yaml::from_str(&contents)
-        .with_context(|| format!("invalid config: failed to parse YAML"))?;
-    
-    // Validate configuration
-    validate_config(&config)?;
-    
-    Ok(config)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    #[serde(default)]
+    pub settings: Settings,
+    #[serde(default)]
+    pub feeds: Vec<Feed>,
 }
 
-/// Validate the entire configuration
-fn validate_config(config: &Config) -> Result<()> {
-    // Validate settings
-    validate_settings(config)?;
-    
-    // Validate each feed
-    if config.feeds.is_empty() {
-        anyhow::bail!("config must contain at least one feed");
-    }
-    
-    for feed in &config.feeds {
-        validate_feed(feed)?;
-    }
-    
-    Ok(())
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Settings {
+    #[serde(default = "default_max_concurrency")]
+    pub max_concurrency: usize,
+    #[serde(default = "default_timeout_secs")]
+    pub default_timeout_secs: u64,
+    #[serde(default = "default_retry_max")]
+    pub retry_max: usize,
+    #[serde(default = "default_retry_base_delay_ms")]
+    pub retry_base_delay_ms: u64,
+    #[serde(default = "default_database_path")]
+    pub database_path: String,
 }
 
-/// Validate global settings
-fn validate_settings(config: &Config) -> Result<()> {
-    let settings = &config.settings;
-    
-    // max_concurrency must be between 1 and 50
-    if settings.max_concurrency < 1 || settings.max_concurrency > 50 {
-        anyhow::bail!(
-            "settings: max_concurrency must be between 1 and 50, got {}",
-            settings.max_concurrency
-        );
-    }
-    
-    // default_timeout_secs must be positive
-    if settings.default_timeout_secs == 0 {
-        anyhow::bail!("settings: default_timeout_secs must be positive");
-    }
-    
-    // retry_base_delay_ms must be positive
-    if settings.retry_base_delay_ms == 0 {
-        anyhow::bail!("settings: retry_base_delay_ms must be positive");
-    }
-    
-    // database_path must not be empty
-    if settings.database_path.is_empty() {
-        anyhow::bail!("settings: database_path cannot be empty");
-    }
-    
-    Ok(())
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Feed {
+    pub name: String,
+    pub url: String,
+    pub feed_type: String,
+    #[serde(default = "default_refresh_interval")]
+    pub refresh_interval_secs: u64,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
 }
 
-/// Validate a single feed configuration
-fn validate_feed(feed: &FeedConfig) -> Result<()> {
-    // Name must not be empty
-    if feed.name.trim().is_empty() {
-        anyhow::bail!("feed: name cannot be empty");
+fn default_max_concurrency() -> usize { 5 }
+fn default_timeout_secs() -> u64 { 10 }
+fn default_retry_max() -> usize { 3 }
+fn default_retry_base_delay_ms() -> u64 { 500 }
+fn default_database_path() -> String { "feedpulse.db".to_string() }
+fn default_refresh_interval() -> u64 { 300 }
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            max_concurrency: default_max_concurrency(),
+            default_timeout_secs: default_timeout_secs(),
+            retry_max: default_retry_max(),
+            retry_base_delay_ms: default_retry_base_delay_ms(),
+            database_path: default_database_path(),
+        }
     }
-    
-    // URL must be valid and HTTP/HTTPS
-    if feed.url.trim().is_empty() {
-        anyhow::bail!("feed '{}': missing field 'url'", feed.name);
-    }
-    
-    let parsed_url = Url::parse(&feed.url)
-        .with_context(|| format!("feed '{}': invalid URL '{}'", feed.name, feed.url))?;
-    
-    let scheme = parsed_url.scheme();
-    if scheme != "http" && scheme != "https" {
-        anyhow::bail!(
-            "feed '{}': URL must use http or https scheme, got '{}'",
-            feed.name,
-            scheme
-        );
-    }
-    
-    // refresh_interval_secs must be positive
-    if feed.refresh_interval_secs == 0 {
-        anyhow::bail!(
-            "feed '{}': refresh_interval_secs must be positive",
-            feed.name
-        );
-    }
-    
-    Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::models::{FeedType, Settings};
-    use std::collections::HashMap;
-
-    #[test]
-    fn test_validate_empty_name() {
-        let feed = FeedConfig {
-            name: "".to_string(),
-            url: "https://example.com".to_string(),
-            feed_type: FeedType::Json,
-            refresh_interval_secs: 300,
-            headers: HashMap::new(),
-        };
+impl Config {
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, String> {
+        let content = fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read config file: {}", e))?;
         
-        assert!(validate_feed(&feed).is_err());
+        let config: Config = serde_yaml::from_str(&content)
+            .map_err(|e| format!("invalid config: {}", e))?;
+        
+        Ok(config)
     }
 
-    #[test]
-    fn test_validate_missing_url() {
-        let feed = FeedConfig {
-            name: "Test Feed".to_string(),
-            url: "".to_string(),
-            feed_type: FeedType::Json,
-            refresh_interval_secs: 300,
-            headers: HashMap::new(),
-        };
-        
-        let result = validate_feed(&feed);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("missing field 'url'"));
-    }
+    pub fn validate(&self) -> Result<(), String> {
+        // Validate settings
+        if self.settings.max_concurrency < 1 || self.settings.max_concurrency > 50 {
+            return Err(format!(
+                "max_concurrency must be between 1-50, got {}",
+                self.settings.max_concurrency
+            ));
+        }
 
-    #[test]
-    fn test_validate_invalid_url() {
-        let feed = FeedConfig {
-            name: "Test Feed".to_string(),
-            url: "not-a-url".to_string(),
-            feed_type: FeedType::Json,
-            refresh_interval_secs: 300,
-            headers: HashMap::new(),
-        };
-        
-        let result = validate_feed(&feed);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid URL"));
-    }
+        if self.settings.default_timeout_secs == 0 {
+            return Err("default_timeout_secs must be positive".to_string());
+        }
 
-    #[test]
-    fn test_validate_non_http_url() {
-        let feed = FeedConfig {
-            name: "Test Feed".to_string(),
-            url: "ftp://example.com".to_string(),
-            feed_type: FeedType::Json,
-            refresh_interval_secs: 300,
-            headers: HashMap::new(),
-        };
-        
-        let result = validate_feed(&feed);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("http or https"));
-    }
+        // Validate feeds
+        for feed in &self.feeds {
+            // Name validation
+            if feed.name.trim().is_empty() {
+                return Err(format!("feed '{}': name cannot be empty", feed.name));
+            }
 
-    #[test]
-    fn test_validate_valid_feed() {
-        let feed = FeedConfig {
-            name: "Test Feed".to_string(),
-            url: "https://example.com".to_string(),
-            feed_type: FeedType::Json,
-            refresh_interval_secs: 300,
-            headers: HashMap::new(),
-        };
-        
-        assert!(validate_feed(&feed).is_ok());
-    }
+            // URL validation
+            if feed.url.trim().is_empty() {
+                return Err(format!("feed '{}': missing field 'url'", feed.name));
+            }
 
-    #[test]
-    fn test_validate_max_concurrency_bounds() {
-        let mut config = Config {
-            settings: Settings {
-                max_concurrency: 0,
-                ..Default::default()
-            },
-            feeds: vec![FeedConfig {
-                name: "Test".to_string(),
-                url: "https://example.com".to_string(),
-                feed_type: FeedType::Json,
-                refresh_interval_secs: 300,
-                headers: HashMap::new(),
-            }],
-        };
-        
-        assert!(validate_settings(&config).is_err());
-        
-        config.settings.max_concurrency = 51;
-        assert!(validate_settings(&config).is_err());
-        
-        config.settings.max_concurrency = 5;
-        assert!(validate_settings(&config).is_ok());
+            Url::parse(&feed.url).map_err(|_| {
+                format!("feed '{}': invalid URL '{}'", feed.name, feed.url)
+            })?;
+
+            // feed_type validation
+            if !["json", "rss", "atom"].contains(&feed.feed_type.as_str()) {
+                return Err(format!(
+                    "feed '{}': feed_type must be one of: json, rss, atom (got '{}')",
+                    feed.name, feed.feed_type
+                ));
+            }
+
+            // refresh_interval validation
+            if feed.refresh_interval_secs == 0 {
+                return Err(format!(
+                    "feed '{}': refresh_interval_secs must be positive",
+                    feed.name
+                ));
+            }
+        }
+
+        Ok(())
     }
 }

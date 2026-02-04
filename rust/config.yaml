@@ -1,0 +1,33 @@
+settings:
+  max_concurrency: 5
+  default_timeout_secs: 10
+  retry_max: 3
+  retry_base_delay_ms: 500
+  database_path: "feedpulse.db"
+
+feeds:
+  - name: "HackerNews Top"
+    url: "https://hacker-news.firebaseio.com/v0/topstories.json"
+    feed_type: "json"
+    refresh_interval_secs: 300
+    headers: {}
+
+  - name: "GitHub Trending"
+    url: "https://api.github.com/search/repositories?q=stars:>1000&sort=stars"
+    feed_type: "json"
+    refresh_interval_secs: 600
+    headers:
+      Accept: "application/vnd.github.v3+json"
+
+  - name: "Lobsters"
+    url: "https://lobste.rs/hottest.json"
+    feed_type: "json"
+    refresh_interval_secs: 300
+    headers: {}
+
+  - name: "Reddit Programming"
+    url: "https://www.reddit.com/r/programming/hot.json"
+    feed_type: "json"
+    refresh_interval_secs: 300
+    headers:
+      User-Agent: "feedpulse/1.0"
