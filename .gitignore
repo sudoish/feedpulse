@@ -19,3 +19,5 @@ rust/target/
 *.swp
 python/venv/
 rust/target/
+go/feedpulse
+*.db
