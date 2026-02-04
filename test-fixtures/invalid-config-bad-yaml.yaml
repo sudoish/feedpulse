@@ -1,0 +1,9 @@
+settings:
+  max_concurrency: five   # should be integer
+  default_timeout_secs: -1  # should be positive
+
+feeds:
+  - name: ""              # empty name
+    url: "not-a-url"      # invalid URL
+    feed_type: "xml"      # invalid type
+    refresh_interval_secs: -100

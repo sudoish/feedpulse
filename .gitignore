@@ -1,0 +1,19 @@
+# Databases
+*.db
+
+# Python
+python/__pycache__/
+python/*.egg-info/
+python/.venv/
+python/venv/
+
+# Go
+go/feedpulse
+
+# Rust
+rust/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
