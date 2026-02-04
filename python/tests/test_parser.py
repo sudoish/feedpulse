@@ -31,8 +31,10 @@ def test_parse_timestamp_iso():
 
 def test_parse_timestamp_invalid():
     """Test parsing invalid timestamp"""
-    assert parse_timestamp("not-a-timestamp") == "not-a-timestamp"
+    assert parse_timestamp("not-a-timestamp") is None
     assert parse_timestamp(None) is None
+    assert parse_timestamp("") is None
+    assert parse_timestamp([]) is None
 
 
 def test_parse_hackernews_valid():

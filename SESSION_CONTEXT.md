@@ -40,14 +40,15 @@ Full spec at `SPEC.md` — concurrent feed aggregator CLI that fetches from Hack
 - **Libraries:** stdlib-heavy (net/http), go-sqlite3, cobra
 - **Status:** Solid, needs RSS/Atom
 
-### Rust Implementation v1 — INCOMPLETE ❌
+### Rust Implementation — REBUILT ✅
 - **Location:** `rust/`
-- **Source LOC:** 1,125
-- **Test LOC:** **0** ❌
-- **Tests:** None written
-- **Error scenarios:** Unknown (no tests to verify)
+- **Source LOC:** 1,176
+- **Test LOC:** **1,252** ✅
+- **Tests:** 70 (all passing)
+- **Error scenarios:** 16/16 validated
 - **Libraries:** reqwest, tokio, serde, rusqlite, clap
-- **Status:** MVP only, not comparable
+- **Status:** Production-ready
+- **Rebuild:** 2026-02-04 (detailed task spec)
 
 ### Initial Evaluation (Unfair Comparison)
 - Created `EVALUATION.md` (2026-02-04)
@@ -56,19 +57,40 @@ Full spec at `SPEC.md` — concurrent feed aggregator CLI that fetches from Hack
 
 ---
 
-## In Progress: Rust Rebuild 🔄
+## Rebuild Results Summary
 
-**Why:** To make a fair comparison, Rust needs the same level of completeness as Python.
+### Python Rebuild (COMPLETE ✅)
+- **Before:** 1,307 source LOC, 576 test LOC, 43 tests
+- **After:** 2,083 source LOC, **2,406 test LOC**, **138 tests** 🏆
+- **Improvements:** +317% test LOC, +221% tests, 100% mypy coverage
+- **New:** exceptions.py, validators.py, utils.py, 4 new test files
+- **Docs:** Comprehensive README + CONTRIBUTING
 
-**Task:** Rebuild Rust implementation with:
-- ✅ Comprehensive test suite (≥500 LOC, match Python's coverage)
-- ✅ All 16 error scenarios tested and validated
-- ✅ Proper project structure (lib.rs + tests/ directory)
-- ✅ Integration tests using shared test-fixtures/
+### Rust Rebuild (COMPLETE ✅)
+- **Before:** 1,125 source LOC, 0 test LOC, 0 tests
+- **After:** 1,176 source LOC, **1,252 test LOC**, **70 tests**
+- **Improvements:** Full test coverage, proper structure (lib.rs + tests/)
+- **New:** 3 test files, comprehensive error handling
+- **Status:** Production-ready
+
+---
+
+## In Progress: Go Rebuild 🔄
+
+**Why:** All three languages deserve the same detailed specifications for fair comparison.
+
+**Task:** Enhance Go implementation with:
+- ✅ Expand tests from 32 to ≥70 (target: 80+)
+- ✅ Increase test LOC from 847 to ≥1,500 (target: 1,800+)
+- ✅ Add integration tests, edge cases, storage tests
+- ✅ Custom error types (internal/errors package)
+- ✅ Validation package
+- ✅ Enhanced documentation (README, CONTRIBUTING)
+- ✅ RSS/Atom support (or documented deferral)
 
 **Assigned to:** Jarvinho (sub-agent)
-- **Session:** agent:jarvinho:subagent:7ab87b8b-0fbd-4fb8-8576-6943bf050996
-- **Task doc:** `RUST_REBUILD_TASK.md`
+- **Session:** agent:jarvinho:subagent:49ba33f1-ecda-4d8e-a1e4-3c705ce3866c
+- **Task doc:** `GO_REBUILD_TASK.md`
 - **Timeout:** 4 hours
 - **Status:** Running...
 
@@ -76,12 +98,13 @@ Full spec at `SPEC.md` — concurrent feed aggregator CLI that fetches from Hack
 
 ## Next Steps
 
-1. ✅ Wait for Jarvinho to complete Rust rebuild
-2. ✅ Update EVALUATION.md with fair comparison
-3. ✅ Create blog post for sudoish.com
-   - **Title:** "I Had AI Build the Same App in Python, Go, and Rust — Here's What It Got Right (and Wrong)"
-   - **Focus:** Test coverage, AI code quality, ecosystem impact
-   - **Insight:** Python's ecosystem gives AI a massive advantage
+1. ✅ Wait for Python rebuild completion (in progress)
+2. ⏭️ Rebuild Go with same detailed specs
+3. ⏭️ Update EVALUATION.md with all three rebuilds
+4. ⏭️ Update blog post with fair comparison results
+5. ⏭️ Publish final comparison to sudoish.com
+
+**Goal:** All three languages get the same level of detailed task specifications to see how AI performs when given comprehensive requirements.
 
 ---
 

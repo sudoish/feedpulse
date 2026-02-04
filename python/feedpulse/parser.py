@@ -1,62 +1,97 @@
-"""Feed data normalization and parsing"""
+"""Feed data normalization and parsing.
+
+This module provides parsers for different feed types:
+- HackerNews API
+- Reddit JSON
+- Lobsters JSON
+- GitHub Events API
+
+Each parser normalizes feed-specific formats into FeedItem objects.
+"""
 
 import sys
 import json
-from typing import List, Optional, Any, Dict
-from datetime import datetime
+from typing import Any, Optional
 
 from .models import FeedItem
+from .utils import coerce_to_string, parse_timestamp
+from .exceptions import MalformedJSONError, UnexpectedStructureError
 
 
-def coerce_to_string(value: Any) -> Optional[str]:
-    """Try to convert value to string"""
-    if isinstance(value, str):
-        return value
-    try:
-        return str(value)
-    except Exception:
-        return None
-
-
-def parse_timestamp(value: Any) -> Optional[str]:
-    """Parse various timestamp formats to ISO 8601"""
-    if not value:
-        return None
+def parse_hackernews(data: Any, source: str) -> list[FeedItem]:
+    """Parse HackerNews API response.
     
-    try:
-        # Unix timestamp (int or float)
-        if isinstance(value, (int, float)):
-            dt = datetime.utcfromtimestamp(value)
-            return dt.isoformat()
+    Supports two formats:
+    1. Top stories API: array of story IDs [12345, 23456, ...]
+    2. Algolia search API: {hits: [{objectID, title, url, ...}, ...]}
+    
+    Args:
+        data: Parsed JSON data
+        source: Source feed name
         
-        # ISO 8601 string
-        if isinstance(value, str):
-            # Try parsing common formats
-            for fmt in ['%Y-%m-%dT%H:%M:%S', '%Y-%m-%dT%H:%M:%SZ', 
-                       '%Y-%m-%d %H:%M:%S', '%Y-%m-%d']:
-                try:
-                    dt = datetime.strptime(value.replace('Z', '').split('+')[0].split('.')[0], fmt)
-                    return dt.isoformat()
-                except ValueError:
-                    continue
-            # If it's already a valid ISO string, return as-is
-            return value
-    except Exception:
-        pass
-    
-    return None
-
-
-def parse_hackernews(data: Any, source: str) -> List[FeedItem]:
+    Returns:
+        List of FeedItem objects
     """
-    Parse HackerNews API response.
-    Top stories returns an array of IDs. Store IDs as items.
-    """
-    items = []
+    items: list[FeedItem] = []
     
     try:
+        # Check if it's the Algolia format with 'hits'
+        if isinstance(data, dict) and 'hits' in data:
+            hits = data.get('hits', [])
+            if not isinstance(hits, list):
+                print(f"Warning: {source}: 'hits' must be a list", file=sys.stderr)
+                return items
+            
+            for i, hit in enumerate(hits):
+                try:
+                    if not isinstance(hit, dict):
+                        continue
+                    
+                    # Get title
+                    title = hit.get('title')
+                    if not title:
+                        continue
+                    title = coerce_to_string(title)
+                    if not title:
+                        continue
+                    
+                    # Get URL (or generate from objectID)
+                    url = hit.get('url')
+                    if not url:
+                        story_id = hit.get('objectID') or hit.get('story_id')
+                        if story_id:
+                            url = f"https://news.ycombinator.com/item?id={story_id}"
+                        else:
+                            continue
+                    
+                    url = coerce_to_string(url)
+                    if not url:
+                        continue
+                    
+                    # Parse timestamp
+                    timestamp = None
+                    created_at = hit.get('created_at_i') or hit.get('created_at')
+                    if created_at:
+                        timestamp = parse_timestamp(created_at)
+                    
+                    item = FeedItem.create(
+                        title=title,
+                        url=url,
+                        source=source,
+                        timestamp=timestamp,
+                        raw_data=hit
+                    )
+                    items.append(item)
+                    
+                except Exception as e:
+                    print(f"Warning: {source}: item {i}: failed to parse: {e}", file=sys.stderr)
+                    continue
+            
+            return items
+        
+        # Original format: list of story IDs
         if not isinstance(data, list):
-            print(f"Warning: {source}: expected list, got {type(data).__name__}", file=sys.stderr)
+            print(f"Warning: {source}: expected list or dict with 'hits', got {type(data).__name__}", file=sys.stderr)
             return items
         
         for i, story_id in enumerate(data[:30]):  # Limit to top 30
@@ -88,13 +123,13 @@ def parse_hackernews(data: Any, source: str) -> List[FeedItem]:
     return items
 
 
-def parse_github(data: Any, source: str) -> List[FeedItem]:
+def parse_github(data: Any, source: str) -> list[FeedItem]:
     """
     Parse GitHub API response.
     Extract from items[]: full_name → title, html_url → url, 
     topics → tags, updated_at → timestamp
     """
-    items = []
+    items: list[FeedItem] = []
     
     try:
         if not isinstance(data, dict):
@@ -166,13 +201,13 @@ def parse_github(data: Any, source: str) -> List[FeedItem]:
     return items
 
 
-def parse_reddit(data: Any, source: str) -> List[FeedItem]:
+def parse_reddit(data: Any, source: str) -> list[FeedItem]:
     """
     Parse Reddit API response.
     Extract from data.children[].data: title → title, url → url,
     created_utc → timestamp, link_flair_text → tags
     """
-    items = []
+    items: list[FeedItem] = []
     
     try:
         if not isinstance(data, dict):
@@ -253,13 +288,13 @@ def parse_reddit(data: Any, source: str) -> List[FeedItem]:
     return items
 
 
-def parse_lobsters(data: Any, source: str) -> List[FeedItem]:
+def parse_lobsters(data: Any, source: str) -> list[FeedItem]:
     """
     Parse Lobsters API response.
     Extract from root array: title → title, url → url (fallback to comments_url),
     created_at → timestamp, tags → tags
     """
-    items = []
+    items: list[FeedItem] = []
     
     try:
         if not isinstance(data, list):
@@ -324,12 +359,20 @@ def parse_lobsters(data: Any, source: str) -> List[FeedItem]:
     return items
 
 
-def parse_feed(response_body: str, feed_type: str, source: str) -> List[FeedItem]:
-    """
-    Parse feed response based on feed_type.
-    Returns list of normalized FeedItems.
-    """
+def parse_feed(response_body: str, feed_type: str, source: str) -> list[FeedItem]:
+    """Parse feed response based on feed_type.
     
+    Supports direct feed types (hackernews, reddit, github, lobsters)
+    and auto-detection mode (json).
+    
+    Args:
+        response_body: Raw feed response (JSON string)
+        feed_type: Feed type ('hackernews', 'reddit', 'github', 'lobsters', or 'json')
+        source: Source feed name (for logging)
+        
+    Returns:
+        List of normalized FeedItem objects
+    """
     # Parse JSON
     try:
         data = json.loads(response_body)
@@ -340,10 +383,17 @@ def parse_feed(response_body: str, feed_type: str, source: str) -> List[FeedItem
         print(f"Error: {source}: failed to parse response: {e}", file=sys.stderr)
         return []
     
-    # Route to appropriate parser
-    if feed_type == 'json':
+    # Route to appropriate parser based on explicit feed_type
+    if feed_type == 'hackernews':
+        return parse_hackernews(data, source)
+    elif feed_type == 'reddit':
+        return parse_reddit(data, source)
+    elif feed_type == 'github':
+        return parse_github(data, source)
+    elif feed_type == 'lobsters':
+        return parse_lobsters(data, source)
+    elif feed_type == 'json':
         # Auto-detect based on structure
-        # This is a simplification - in production we'd need better detection
         if isinstance(data, list):
             # Could be HackerNews (list of ints) or Lobsters (list of dicts)
             if data and isinstance(data[0], int):
@@ -355,15 +405,15 @@ def parse_feed(response_body: str, feed_type: str, source: str) -> List[FeedItem
                 return parse_github(data, source)
             elif 'data' in data and isinstance(data.get('data'), dict):
                 return parse_reddit(data, source)
+            elif 'hits' in data:
+                return parse_hackernews(data, source)
         
         print(f"Warning: {source}: unable to auto-detect JSON feed structure", file=sys.stderr)
         return []
-    
     elif feed_type in ('rss', 'atom'):
         # Not implemented for this experiment
         print(f"Warning: {source}: RSS/Atom parsing not implemented", file=sys.stderr)
         return []
-    
     else:
         print(f"Warning: {source}: unknown feed_type '{feed_type}'", file=sys.stderr)
         return []

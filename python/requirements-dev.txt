@@ -1,0 +1,22 @@
+# Development dependencies for FeedPulse
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
+pytest-asyncio>=0.21.0
+
+# Type checking
+mypy>=1.4.0
+types-PyYAML>=6.0.12
+
+# Code quality
+black>=23.3.0
+ruff>=0.0.270
+
+# Documentation
+sphinx>=7.0.0
+sphinx-rtd-theme>=1.2.0
+
+# Development tools
+ipython>=8.14.0
+ipdb>=0.13.13

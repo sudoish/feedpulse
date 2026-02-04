@@ -1,18 +1,21 @@
-"""SQLite storage for feed items and fetch logs"""
+"""SQLite storage for feed items and fetch logs.
+
+This module provides database operations for storing feed items and fetch logs.
+Handles duplicate detection, transaction management, and query operations.
+"""
 
 import sys
 import sqlite3
 import json
-from typing import List, Optional
-from datetime import datetime
+from typing import Optional
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .models import FeedItem, FetchResult
+from .exceptions import DatabaseLockedError, DatabaseCorruptedError, StorageError
 
-
-class DatabaseError(Exception):
-    """Database operation error"""
-    pass
+# Compatibility alias for existing code
+DatabaseError = StorageError
 
 
 class FeedDatabase:
@@ -86,7 +89,7 @@ class FeedDatabase:
         except Exception as e:
             raise DatabaseError(f"Failed to initialize database: {e}")
     
-    def store_results(self, results: List[FetchResult]) -> int:
+    def store_results(self, results: list[FetchResult]) -> int:
         """
         Store fetch results (items and logs) in a single transaction.
         Returns total number of new items inserted.
@@ -108,7 +111,7 @@ class FeedDatabase:
                         VALUES (?, ?, ?, ?, ?, ?)
                     """, (
                         result.source,
-                        datetime.utcnow().isoformat(),
+                        datetime.now(UTC).isoformat(),
                         result.status,
                         len(result.items),
                         result.error_message,
@@ -138,7 +141,7 @@ class FeedDatabase:
                             item.timestamp,
                             json.dumps(item.tags) if item.tags else None,
                             item.raw_data,
-                            item.created_at or datetime.utcnow().isoformat()
+                            item.created_at or datetime.now(UTC).isoformat()
                         ))
                     
                     result.items_new = new_count
@@ -262,3 +265,187 @@ class FeedDatabase:
         
         except Exception as e:
             raise DatabaseError(f"Failed to get sources status: {e}")
+    
+    # Helper methods for testing and direct API access
+    
+    def insert_items(self, items: list[FeedItem]) -> int:
+        """Insert feed items directly into database.
+        
+        This is a helper method primarily for testing. For production use,
+        prefer store_results() which handles both items and logging.
+        
+        Args:
+            items: List of FeedItem objects to insert
+            
+        Returns:
+            Number of new items inserted (excluding duplicates)
+        """
+        if not items:
+            return 0
+        
+        try:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                new_count = 0
+                
+                for item in items:
+                    # Check if item exists
+                    cursor.execute("SELECT id FROM feed_items WHERE id = ?", (item.id,))
+                    exists = cursor.fetchone() is not None
+                    
+                    if not exists:
+                        new_count += 1
+                        cursor.execute("""
+                            INSERT INTO feed_items
+                            (id, title, url, source, timestamp, tags, raw_data, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            item.id,
+                            item.title,
+                            item.url,
+                            item.source,
+                            item.timestamp,
+                            json.dumps(item.tags) if item.tags else None,
+                            item.raw_data,
+                            item.created_at or datetime.now(UTC).isoformat()
+                        ))
+                
+                conn.commit()
+                return new_count
+            
+            finally:
+                conn.close()
+        
+        except Exception as e:
+            raise DatabaseError(f"Failed to insert items: {e}")
+    
+    def get_items_by_source(self, source: str, limit: Optional[int] = None) -> list[FeedItem]:
+        """Get all items from a specific source.
+        
+        Args:
+            source: Source feed name
+            limit: Maximum number of items to return
+            
+        Returns:
+            List of FeedItem objects
+        """
+        try:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                
+                query = """
+                    SELECT id, title, url, source, timestamp, tags, raw_data, created_at
+                    FROM feed_items
+                    WHERE source = ?
+                    ORDER BY timestamp DESC
+                """
+                
+                if limit:
+                    query += f" LIMIT {limit}"
+                
+                cursor.execute(query, (source,))
+                
+                items = []
+                for row in cursor.fetchall():
+                    tags = json.loads(row['tags']) if row['tags'] else []
+                    item = FeedItem(
+                        id=row['id'],
+                        title=row['title'],
+                        url=row['url'],
+                        source=row['source'],
+                        timestamp=row['timestamp'],
+                        tags=tags,
+                        raw_data=row['raw_data'],
+                        created_at=row['created_at']
+                    )
+                    items.append(item)
+                
+                return items
+            
+            finally:
+                conn.close()
+        
+        except Exception as e:
+            raise DatabaseError(f"Failed to get items by source: {e}")
+    
+    def get_all_items(self, limit: Optional[int] = None) -> list[FeedItem]:
+        """Get all items from database.
+        
+        Args:
+            limit: Maximum number of items to return
+            
+        Returns:
+            List of FeedItem objects
+        """
+        try:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                
+                query = """
+                    SELECT id, title, url, source, timestamp, tags, raw_data, created_at
+                    FROM feed_items
+                    ORDER BY timestamp DESC
+                """
+                
+                if limit:
+                    query += f" LIMIT {limit}"
+                
+                cursor.execute(query)
+                
+                items = []
+                for row in cursor.fetchall():
+                    tags = json.loads(row['tags']) if row['tags'] else []
+                    item = FeedItem(
+                        id=row['id'],
+                        title=row['title'],
+                        url=row['url'],
+                        source=row['source'],
+                        timestamp=row['timestamp'],
+                        tags=tags,
+                        raw_data=row['raw_data'],
+                        created_at=row['created_at']
+                    )
+                    items.append(item)
+                
+                return items
+            
+            finally:
+                conn.close()
+        
+        except Exception as e:
+            raise DatabaseError(f"Failed to get all items: {e}")
+    
+    def log_fetch(self, result: FetchResult) -> None:
+        """Log a fetch result to the database.
+        
+        Args:
+            result: FetchResult object to log
+        """
+        try:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    INSERT INTO fetch_log 
+                    (source, fetched_at, status, items_count, error_message, duration_ms)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    result.source,
+                    datetime.now(UTC).isoformat(),
+                    result.status,
+                    result.items_new,
+                    result.error_message,
+                    result.duration_ms
+                ))
+                
+                conn.commit()
+            
+            finally:
+                conn.close()
+        
+        except Exception as e:
+            raise DatabaseError(f"Failed to log fetch: {e}")

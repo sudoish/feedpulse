@@ -157,14 +157,14 @@ async def fetch_all_feeds(feeds: List[FeedConfig], settings: Settings) -> List[F
             # Convert exceptions to error results
             final_results = []
             for i, result in enumerate(results):
-                if isinstance(result, Exception):
+                if isinstance(result, BaseException):
                     final_results.append(FetchResult(
                         source=feeds[i].name,
                         status='error',
                         error_message=f"unexpected error: {result}",
                         duration_ms=0
                     ))
-                else:
+                elif isinstance(result, FetchResult):
                     final_results.append(result)
             
             return final_results
