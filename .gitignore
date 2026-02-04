@@ -17,3 +17,5 @@ rust/target/
 .idea/
 .vscode/
 *.swp
+python/venv/
+rust/target/
